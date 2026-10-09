@@ -6,8 +6,31 @@ import numpy as np
 import torch
 import torch.nn as nn
 from model.net import CDLNet, GDLNet, DnCNN, FFDNet
+from model.barlow import sample_pixels, codes_to_rows, barlow_loss, Projector
 from data import get_fit_loaders
 from utils import awgn, gen_bayer_mask
+
+# defaults for args['train']['fit']['barlow']
+BARLOW_DEFAULTS = {"views":      2,      # 1 -> single noise draw (no barlow)
+                   "view_sigma": "same", # second view noise-level: "same" or "diff" (resampled)
+                   "beta":       0.0,    # weight of barlow loss
+                   "lambda":     5e-3,   # off-diagonal weight
+                   "eps":        1e-5,   # variance eps in feature standardization
+                   "n_pixels":   None,   # num. code pixels sampled per batch (None -> all)
+                   "projector":  None}   # None or Projector kwargs, e.g. {"dims": [2048,2048,2048]}
+
+def barlow_config(barlow):
+    """ fill barlow args with defaults and check for unknown keys.
+    """
+    unknown = set(barlow) - set(BARLOW_DEFAULTS)
+    if unknown:
+        raise ValueError(f"unknown barlow args: {unknown}")
+    bt = {**BARLOW_DEFAULTS, **barlow}
+    if bt["views"] not in [1, 2]:
+        raise ValueError(f"barlow views must be 1 or 2, got {bt['views']}")
+    if bt["view_sigma"] not in ["same", "diff"]:
+        raise ValueError(f"barlow view_sigma must be 'same' or 'diff', got {bt['view_sigma']}")
+    return bt
 
 def main(args):
     """ Given argument dictionary, load data, initialize model, and fit model.
@@ -47,13 +70,29 @@ def fit(net, opt, loaders,
         save_freq = 1,
         epoch_fun = None,
         mcsure = False,
-        backtrack_thresh = 1):
+        backtrack_thresh = 1,
+        barlow = None):
     """ fit net to training data.
     """
     print(f"fit: using device {device}")
 
     if not type(noise_std) in [list, tuple]:
         noise_std = (noise_std, noise_std)
+
+    # two noisy views per training batch: MSE on both + beta * barlow(codes)
+    two_view = False
+    if barlow is not None:
+        bt = barlow_config(barlow)
+        if mcsure or demosaic:
+            raise NotImplementedError("barlow is not supported with mcsure or demosaic.")
+        two_view = bt["views"] == 2
+        if two_view:
+            print(f"fit: two-view training with barlow args {bt}")
+
+    # projector is clipped separately so it does not eat the net's clip budget
+    proj_params = list(net.projector.parameters()) if hasattr(net, 'projector') else []
+    proj_ids    = {id(p) for p in proj_params}
+    net_params  = [p for p in net.parameters() if id(p) not in proj_ids]
 
     print("Saving initialization to 0.ckpt")
 
@@ -75,6 +114,7 @@ def fit(net, opt, loaders,
             else:
                 phase_nstd = noise_std
             psnr = 0
+            bt_sums = np.zeros(5) # mse, barlow, on, off, mean C_ii
 
             t = tqdm(iter(loaders[phase]), desc=phase.upper()+'-E'+str(epoch), dynamic_ncols=True)
             for itern, batch in enumerate(t):
@@ -85,7 +125,7 @@ def fit(net, opt, loaders,
                 opt.zero_grad()
 
                 with torch.set_grad_enabled(phase == 'train'):
-                    batch_hat, _ = net(obsrv_batch, sigma_n, mask=mask)
+                    batch_hat, z = net(obsrv_batch, sigma_n, mask=mask)
 
                     # supervised or unsupervised (MCSURE) loss during training
                     if mcsure and phase == "train":
@@ -95,21 +135,46 @@ def fit(net, opt, loaders,
                         # assume you have a good estimator for sigma_n
                         div = 2.0*torch.mean(((sigma_n/255.0)**2)*b*(batch_hat_b-batch_hat)) / h
                         loss = torch.mean((obsrv_batch - batch_hat)**2) + div
+                        mse  = loss
                     else:
-                        loss = torch.mean((batch - batch_hat)**2)
+                        mse  = torch.mean((batch - batch_hat)**2)
+                        loss = mse
+
+                    # second noisy view, MSE on both views + beta * barlow on final codes
+                    if two_view and phase == "train":
+                        if bt["view_sigma"] == "same":
+                            noisy_batch_2, sigma_2 = awgn(batch, sigma_n)
+                        else:
+                            noisy_batch_2, sigma_2 = awgn(batch, phase_nstd)
+                        batch_hat_2, z_2 = net(noisy_batch_2, sigma_2)
+                        mse = (mse + torch.mean((batch - batch_hat_2)**2)) / 2
+
+                        idx = sample_pixels(z, bt["n_pixels"])
+                        r, r_2 = codes_to_rows(z, idx), codes_to_rows(z_2, idx)
+                        if hasattr(net, 'projector'):
+                            r, r_2 = net.projector(r), net.projector(r_2)
+                        bt_loss, on, off, C = barlow_loss(r, r_2, lambd=bt["lambda"], eps=bt["eps"])
+                        loss = mse + bt["beta"]*bt_loss
+                        bt_sums += [mse.item(), bt_loss.item(), on.item(), off.item(), C.diagonal().mean().item()]
 
                     if phase == 'train':
                         loss.backward()
                         if clip_grad is not None:
-                            nn.utils.clip_grad_norm_(net.parameters(), clip_grad)
+                            nn.utils.clip_grad_norm_(net_params, clip_grad)
+                            if proj_params:
+                                nn.utils.clip_grad_norm_(proj_params, clip_grad)
                         opt.step()
                         net.project()
                 loss = loss.item()
+                mse  = mse.item()
 
                 if verbose:
-                    total_norm = grad_norm(net.parameters())
-                    t.set_postfix_str(f"loss={loss:.1e}|gnorm={total_norm:.1e}")
-                psnr = psnr - 10*np.log10(loss)
+                    total_norm = grad_norm(net_params)
+                    postfix = f"loss={loss:.1e}|gnorm={total_norm:.1e}"
+                    if two_view and phase == "train":
+                        postfix += f"|bt={bt_loss.item():.2e}|Cii={C.diagonal().mean().item():.3f}"
+                    t.set_postfix_str(postfix)
+                psnr = psnr - 10*np.log10(mse)
 
             psnr = psnr/(itern+1)
             print(f"{phase.upper()} PSNR: {psnr:.3f} dB")
@@ -122,6 +187,9 @@ def fit(net, opt, loaders,
 
             with open(os.path.join(save_dir, f'{phase}.txt'),'a') as psnr_file:
                 psnr_file.write(f'{psnr:.3f}, ')
+
+            if two_view and phase == "train":
+                write_barlow_log(os.path.join(save_dir, 'barlow.txt'), epoch, bt_sums/(itern+1))
 
         if (psnr + backtrack_thresh < top_psnr[phase]) or np.isnan(loss) or np.isinf(loss):
             ckpt_path = os.path.join(save_dir, 'net.ckpt')
@@ -160,6 +228,15 @@ def fit(net, opt, loaders,
                 epoch_fun(epoch)
 
         epoch = epoch + 1
+
+def write_barlow_log(path, epoch, vals):
+    """ append epoch-averaged (mse, barlow, on, off, mean C_ii) to path.
+    """
+    new = not os.path.exists(path)
+    with open(path, 'a') as log_file:
+        if new:
+            log_file.write("epoch, mse, barlow, on, off, mean_Cii\n")
+        log_file.write(f"{epoch}, " + ", ".join(f"{v:.6e}" for v in vals) + "\n")
 
 def set_seed(seed):
     """ seed python, numpy, and torch (all devices) RNGs.
@@ -206,6 +283,11 @@ def init_model(args, device=torch.device("cpu")):
     else:
         raise NotImplementedError
 
+    # barlow projector is attached to net so that it is checkpointed with it
+    barlow = train_args.get('fit', {}).get('barlow')
+    if barlow is not None and barlow.get('projector') is not None:
+        net.projector = Projector(net.M, **barlow['projector'])
+
     net.to(device)
 
     opt   = torch.optim.Adam(net.parameters(), **train_args['opt'])     
@@ -223,6 +305,10 @@ def init_model(args, device=torch.device("cpu")):
         print(param_group['lr'])
 
     total_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
+    if hasattr(net, 'projector'):
+        proj_params = sum(p.numel() for p in net.projector.parameters() if p.requires_grad)
+        total_params = total_params - proj_params
+        print(f"Number of Projector Parameters: {proj_params:,}")
     print(f"Total Number of Parameters: {total_params:,}")
 
     print(f"Using {paths['save']} ...")
