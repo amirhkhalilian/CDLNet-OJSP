@@ -12,6 +12,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 import model
 import model.nle
+from model.metrics import get_filters, shift_coherence, freq_order, net_dict_metrics
 import utils, data, train
 
 import argparse
@@ -25,6 +26,8 @@ parser.add_argument("--blind", type=str, default=None, choices=["MAD", "PCA"], h
 parser.add_argument("--save", action="store_true", help="Save test, intermediate passthrough results to files.")
 parser.add_argument("--thresholds", action="store_true", help="Plot network thresholds.")
 parser.add_argument("--filters", action="store_true", help="Save network A,B filterbanks.")
+parser.add_argument("--coherence", action="store_true", help="Save shift-coherence heatmaps, histogram, per-layer curves, and summary json.")
+parser.add_argument("--dup_thresh", type=float, help="Shift-coherence threshold for near-duplicate atoms.", default=0.9)
 parser.add_argument("--save_dir", type=str, help="Where to save analyze results.", default=None)
 parser.add_argument("--color", action="store_true", help="Use color images.")
 parser.add_argument("--demosaic", action="store_true", help="Demosaicing problem.")
@@ -65,6 +68,9 @@ def main(model_args):
         if ARGS.filters:
             filters(net, scale_each=True)
 
+        if ARGS.coherence:
+            coherence(net, thresh=ARGS.dup_thresh, epoch=epoch0)
+
 def test(net, loader, noise_level=25, blind=False, device=torch.device('cpu')):
     """ Evaluate net on test-set.
     """
@@ -87,7 +93,7 @@ def test(net, loader, noise_level=25, blind=False, device=torch.device('cpu')):
             if net.adaptive:
                 if blind is not None and blind is not False:
                     s = 255 * model.nle.noise_level(y, method=blind)
-                    print(f"sigma_hat = {sigma.flatten().item():.3f}")
+                    print(f"sigma_hat = {s.flatten().item():.3f}")
                 else:
                     print(f"using GT sigma.")
             else:
@@ -179,6 +185,83 @@ def filters(net, scale_each=False):
     fn = os.path.join(save_dir, f"D{k:02d}_{scale_each}.png")
     print(f"Saving {fn} ...")
     save_image(D, fn, nrow=n, scale_each=scale_each, normalize=True)
+    print("done.")
+
+def coherence(net, thresh=0.9, epoch=None):
+    """ Saves shift-coherence heatmaps (A_{K-1}, D), histogram, per-layer curves,
+    and summary json of dictionary redundancy metrics.
+    """
+    print("--------- coherence ---------")
+    if not (hasattr(net, 'A') and hasattr(net, 'D')):
+        raise NotImplementedError
+    save_dir = os.path.join(ARGS.save_dir, "coherence")
+    os.makedirs(save_dir, exist_ok=True)
+
+    m = net_dict_metrics(net, thresh)
+    fn = os.path.join(save_dir, "coherence.json")
+    print(f"Saving summary to {fn} ...")
+    with open(fn, 'w') as json_file:
+        json.dump({"epoch": epoch, **m}, json_file, indent=2)
+
+    # heatmaps, atoms ordered by peak frequency (binned) then orientation
+    banks = {f"A{net.K-1:02d}": (net.A[net.K-1], m["A"][-1]), "D": (net.D, m["D"])}
+    for name, (op, s) in banks.items():
+        W  = get_filters(op)
+        o  = freq_order(W)
+        SC = shift_coherence(W).cpu().numpy()[o][:,o]
+        fig = plt.figure()
+        ax = plt.gca()
+        im = ax.imshow(SC, cmap='magma', vmin=0, vmax=1, interpolation='nearest')
+        plt.xlabel("atom (sorted by frequency, orientation)")
+        plt.ylabel("atom")
+        plt.title(f"{name}: $\\mu_s$={s['mu_s']:.3f}, near-dup pairs={s['n_dup_pairs']}")
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        plt.colorbar(im, cax=cax)
+        fn = os.path.join(save_dir, f"sc_{name}.png")
+        print(f"Saving {fn} ...")
+        plt.savefig(fn, dpi=300, bbox_inches='tight')
+        plt.close()
+
+    # histogram of off-diagonal shift-coherence
+    offdiag = lambda SC: SC[~np.eye(len(SC), dtype=bool)]
+    A_sc = np.concatenate([offdiag(shift_coherence(get_filters(net.A[k])).cpu().numpy()) for k in range(net.K)])
+    D_sc = offdiag(shift_coherence(get_filters(net.D)).cpu().numpy())
+    plt.figure()
+    plt.hist(A_sc, bins=50, range=(0,1), density=True, alpha=0.6, label="A (all k)")
+    plt.hist(D_sc, bins=50, range=(0,1), density=True, alpha=0.6, label="D")
+    plt.axvline(thresh, color='k', linestyle='--', label=f"thresh={thresh}")
+    plt.xlabel("shift-coherence (off-diagonal)")
+    plt.ylabel("density")
+    plt.legend()
+    fn = os.path.join(save_dir, "sc_hist.png")
+    print(f"Saving {fn} ...")
+    plt.savefig(fn, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # per-layer curves
+    k = np.arange(net.K)
+    fig, axs = plt.subplots(1, 2, figsize=(10, 3.5))
+    axs[0].plot(k, [a["mu_s"] for a in m["A"]], 'o-', label="A max")
+    axs[0].plot(k, [a["mean_s"] for a in m["A"]], 's-', label="A mean")
+    axs[0].axhline(m["D"]["mu_s"], color='C0', linestyle='--', label="D max")
+    axs[0].axhline(m["D"]["mean_s"], color='C1', linestyle='--', label="D mean")
+    axs[0].set_xlabel("k (iteration)")
+    axs[0].set_ylabel("shift-coherence")
+    axs[0].set_ylim(0, 1.05)
+    axs[0].legend(loc='lower center', ncol=2)
+    axs[1].plot(k, [a["n_dup_pairs"] for a in m["A"]], 'o-', label="A")
+    axs[1].axhline(m["D"]["n_dup_pairs"], color='C0', linestyle='--', label="D")
+    axs[1].set_xlabel("k (iteration)")
+    axs[1].set_ylabel(f"near-duplicate pairs (SC > {thresh})")
+    axs[1].legend()
+    fn = os.path.join(save_dir, "sc_layers.png")
+    print(f"Saving {fn} ...")
+    plt.savefig(fn, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    print(f"A (mean over k): mu_s={m['A_mean']['mu_s']:.3f}, n_dup_pairs={m['A_mean']['n_dup_pairs']:.1f}")
+    print(f"D:               mu_s={m['D']['mu_s']:.3f}, n_dup_pairs={m['D']['n_dup_pairs']}")
     print("done.")
 
 def dictionary(net):

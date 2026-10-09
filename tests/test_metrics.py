@@ -5,7 +5,7 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import torch
-from model.metrics import xcorr, shift_coherence, dict_summary, net_dict_metrics
+from model.metrics import xcorr, shift_coherence, dict_summary, net_dict_metrics, peak_frequency, freq_order
 from model.net import CDLNet, GDLNet
 
 def brute_force_sc(W):
@@ -91,6 +91,24 @@ def test_net_dict_metrics():
         # all layers start from the same filters
         assert all(abs(out["A"][k]["mu_s"] - out["A"][0]["mu_s"]) < 1e-6 for k in range(3))
         assert all(isinstance(v, (int, float)) for v in out["A_mean"].values())
+
+def test_peak_frequency():
+    P, n = 11, 64
+    y, x = torch.meshgrid(torch.arange(P).float(), torch.arange(P).float(), indexing='ij')
+    w = 2*np.pi*8/n
+    W = torch.stack([torch.ones(P,P),             # DC
+                     torch.cos(w*x),              # horizontal frequency -> theta 0
+                     torch.cos(w*y),              # vertical frequency   -> theta pi/2
+                     torch.cos(w*(x+y)/np.sqrt(2))])[:,None]  # diagonal -> theta pi/4
+    radial, theta = peak_frequency(W, n=n)
+    df = 2*np.pi/n
+    assert radial[0] == 0
+    assert all(abs(radial[i] - w) <= 1.5*df for i in [1,2,3]), radial
+    assert abs(theta[1]) < 1e-6 or abs(theta[1] - np.pi) < 1e-6
+    assert abs(theta[2] - np.pi/2) < 1e-6
+    assert abs(theta[3] - np.pi/4) < 0.2, theta
+    order = freq_order(W)
+    assert order[0] == 0 and sorted(order) == [0,1,2,3]
 
 if __name__ == "__main__":
     tests = [(n, f) for n, f in list(globals().items()) if n.startswith("test_")]

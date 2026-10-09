@@ -27,6 +27,24 @@ def shift_coherence(W):
     """
     return xcorr(W).abs().amax(dim=(2,3))
 
+def peak_frequency(W, n=64):
+    """ frequency at the peak of each atom's magnitude response (summed over channels).
+    W: (M, C, P, P) filterbank
+    output: radial frequency in rad/pixel, orientation in [0, pi), each of shape (M,)
+    """
+    X = torch.fft.fft2(W, s=(n,n)).abs().sum(dim=1)
+    k = X.flatten(1).argmax(dim=1)
+    f = 2*np.pi*torch.fft.fftfreq(n, device=W.device)
+    wy, wx = f[k // n], f[k % n]
+    return torch.sqrt(wy**2 + wx**2), torch.atan2(wy, wx) % np.pi
+
+def freq_order(W, n_bins=6):
+    """ atom ordering by peak radial frequency (binned), then orientation.
+    """
+    radial, theta = [v.cpu().numpy() for v in peak_frequency(W)]
+    rbin = np.floor(radial / (np.pi*np.sqrt(2)/n_bins))
+    return np.lexsort((theta, rbin))
+
 def dict_summary(W, thresh=0.9):
     """ redundancy summary of filterbank W (M, C, P, P).
     mu_s, mean_s: max, mean off-diagonal shift-coherence
