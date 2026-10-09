@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 from model.net import CDLNet, GDLNet, DnCNN, FFDNet
 from model.barlow import sample_pixels, codes_to_rows, barlow_loss, Projector
+from model.metrics import net_dict_metrics
 from data import get_fit_loaders
 from utils import awgn, gen_bayer_mask
 
@@ -94,10 +95,16 @@ def fit(net, opt, loaders,
     proj_ids    = {id(p) for p in proj_params}
     net_params  = [p for p in net.parameters() if id(p) not in proj_ids]
 
+    # dictionary redundancy metrics for dictionary-learning nets (CDLNet, GDLNet)
+    has_dict = hasattr(net, 'A') and hasattr(net, 'D')
+    dict_path = os.path.join(save_dir, 'dict_metrics.jsonl')
+
     print("Saving initialization to 0.ckpt")
 
     ckpt_path = os.path.join(save_dir, '0.ckpt')
     save_ckpt(ckpt_path, net, 0, opt, sched)
+    if has_dict:
+        write_dict_metrics(dict_path, net, start_epoch - 1)
 
     top_psnr = {"train": 0, "val": 0, "test": 0} # for backtracking
     epoch = start_epoch
@@ -213,6 +220,9 @@ def fit(net, opt, loaders,
             epoch = epoch + 1
             continue
 
+        if has_dict and (epoch % val_freq == 0 or epoch == start_epoch + epochs - 1):
+            write_dict_metrics(dict_path, net, epoch)
+
         if sched is not None:
             sched.step()
             if hasattr(sched, "step_size") and epoch % sched.step_size == 0:
@@ -237,6 +247,15 @@ def write_barlow_log(path, epoch, vals):
         if new:
             log_file.write("epoch, mse, barlow, on, off, mean_Cii\n")
         log_file.write(f"{epoch}, " + ", ".join(f"{v:.6e}" for v in vals) + "\n")
+
+def write_dict_metrics(path, net, epoch):
+    """ append dictionary redundancy metrics of net at epoch to path (json lines).
+    """
+    m = net_dict_metrics(net)
+    print(f"DICT: mu_s(A)={m['A_mean']['mu_s']:.3f}, n_dup(A)={m['A_mean']['n_dup_pairs']:.1f} | "
+          f"mu_s(D)={m['D']['mu_s']:.3f}, n_dup(D)={m['D']['n_dup_pairs']}")
+    with open(path, 'a') as log_file:
+        log_file.write(json.dumps({"epoch": epoch, **m}) + "\n")
 
 def set_seed(seed):
     """ seed python, numpy, and torch (all devices) RNGs.
