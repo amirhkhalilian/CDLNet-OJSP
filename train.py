@@ -282,7 +282,7 @@ def setlr(opt, lr):
     if not issubclass(type(lr), (list, np.ndarray)):
         lr = [lr for _ in range(len(opt.param_groups))]
     for (i, pg) in enumerate(opt.param_groups):
-        pg['lr'] = lr[i]
+        pg['lr'] = float(lr[i]) # python float keeps numpy out of checkpoints
 
 def init_model(args, device=torch.device("cpu")):
     """ Return model, optimizer, scheduler with optional initialization
@@ -350,7 +350,11 @@ def load_ckpt(path, net=None,opt=None,sched=None):
     Loads net, optimizer, scheduler and epoch number
     from state dict stored in path.
     """
-    ckpt = torch.load(path, map_location=torch.device('cpu'))
+    # weights_only=False: older checkpoints contain numpy scalars (torch>=2.6 default is True)
+    try:
+        ckpt = torch.load(path, map_location=torch.device('cpu'), weights_only=False)
+    except TypeError: # torch<1.13 has no weights_only arg
+        ckpt = torch.load(path, map_location=torch.device('cpu'))
     def setSD(obj, name):
         if obj is not None and name+"_state_dict" in ckpt:
             print(f"Loading {name} state-dict...")
