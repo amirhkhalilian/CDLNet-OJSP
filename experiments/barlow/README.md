@@ -78,6 +78,25 @@ beta whose val/test PSNR stays within ~0.1 dB of c1.
 Keep the trailing slash on `dataset/CBSD68/`: `analyze.py` names the log after the parent
 dir of the path, so this gives `test_CBSD68_None.txt` (without it: `test_dataset_None.txt`).
 
+**5. Aggregate** (every subdirectory with an `args.json` is a run; groups are (condition, beta),
+seeds pooled as mean ± std):
+
+    python experiments/barlow/aggregate.py trained_nets/barlow/pilot
+    python experiments/barlow/aggregate.py trained_nets/barlow
+
+Writes to `<runs_root>/aggregate/`:
+
+| File | Content |
+|---|---|
+| `summary.md` | table per group: μ_s, n_dup, μ_0 of A (mean over k), μ_s, n_dup of D, val/test PSNR, mean C_ii, backtracks |
+| `runs.csv`, `groups.csv` | the same numbers per run / per group |
+| `tradeoff.png` | test PSNR (σ=25, `--psnr_sigma`) vs μ_s(A) and vs n_dup(A); beta sweeps connected (pilot) |
+| `training.png` | n_dup(A), μ_s(A) over training, one column per Barlow condition, c0/c1 as gray references |
+| `layers.png` | final μ_s(A_k), n_dup(A_k) per layer k, same layout |
+
+Runs without `coherence/coherence.json` fall back to their last `dict_metrics.jsonl` entry, and
+runs without a test log fall back to final val PSNR (both are reported when it happens).
+
 ## Per-run outputs
 
 | File | Content |
