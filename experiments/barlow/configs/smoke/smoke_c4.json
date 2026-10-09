@@ -1,0 +1,68 @@
+{
+    "model": {
+        "C": 1,
+        "K": 3,
+        "M": 8,
+        "P": 11,
+        "adaptive": true,
+        "order": 1,
+        "s": 2
+    },
+    "paths": {
+        "ckpt": null,
+        "save": "experiments/barlow/smoke_runs/smoke_c4"
+    },
+    "seed": 0,
+    "train": {
+        "fit": {
+            "backtrack_thresh": 2,
+            "barlow": {
+                "beta": 0.001,
+                "lambda": 0.00125,
+                "n_pixels": 256,
+                "projector": {
+                    "dims": [
+                        64,
+                        64,
+                        32
+                    ]
+                },
+                "view_sigma": "same",
+                "views": 2
+            },
+            "clip_grad": 0.05,
+            "demosaic": false,
+            "epochs": 2,
+            "mcsure": false,
+            "noise_std": [
+                10,
+                40
+            ],
+            "save_freq": 1,
+            "val_freq": 1,
+            "verbose": true
+        },
+        "loaders": {
+            "batch_size": 4,
+            "crop_size": 64,
+            "load_color": false,
+            "trn_path_list": [
+                "dataset/Set12"
+            ],
+            "tst_path_list": [
+                "dataset/Set12"
+            ],
+            "val_path_list": [
+                "dataset/Set12"
+            ]
+        },
+        "opt": {
+            "lr": 0.001
+        },
+        "sched": {
+            "gamma": 0.95,
+            "step_size": 50
+        }
+    },
+    "type": "GDLNet"
+}

@@ -3,3 +3,6 @@ job.sh
 slurm/
 manuscript/
 
+*.pdf
+*.png
+*jpeg
