@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, json
+import os, sys, json, random
 from tqdm import tqdm
 from pprint import pprint
 import numpy as np
@@ -14,6 +14,10 @@ def main(args):
     """
     ngpu = torch.cuda.device_count()
     device = torch.device("cuda:0" if ngpu > 0 else "cpu")
+
+    if args.get('seed') is not None:
+        print(f"Using seed {args['seed']}.")
+        set_seed(args['seed'])
 
     model_args, train_args, paths = [args[item] for item in ['model','train','paths']]
     loaders = get_fit_loaders(**train_args['loaders'])
@@ -156,6 +160,13 @@ def fit(net, opt, loaders,
                 epoch_fun(epoch)
 
         epoch = epoch + 1
+
+def set_seed(seed):
+    """ seed python, numpy, and torch (all devices) RNGs.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
 def grad_norm(params):
     """ computes norm of mini-batch gradient
