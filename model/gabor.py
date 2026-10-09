@@ -41,7 +41,8 @@ class ConvAdjoint2dGabor(nn.Module):
         self.ks = ks
         p = (ks-1)//2
         self._pad = (p,p,p,p)
-        self._output_padding = nn.ConvTranspose2d(1,1,ks,stride=self.stride)._output_padding
+        # output_padding s.t. forward maps (H,W) -> (stride*H, stride*W)
+        self._output_padding = stride - ks + 2*p
         
     def get_filter(self, transpose=False):
         if transpose:
@@ -55,13 +56,7 @@ class ConvAdjoint2dGabor(nn.Module):
         return F.conv2d(pad_x, self.get_filter(transpose=True), stride=self.stride)
 
     def forward(self, x):
-        output_size = (x.shape[0], x.shape[1], self.stride*x.shape[2], self.stride*x.shape[3])
-        op = self._output_padding(x, output_size,
-                                  (self.stride, self.stride),
-                                  (self._pad[0], self._pad[0]),
-                                  (self.ks, self.ks))
-
         return F.conv_transpose2d(x, self.get_filter(),
                                   padding = self._pad[0],
                                   stride  = self.stride,
-                                  output_padding = op)
+                                  output_padding = self._output_padding)
