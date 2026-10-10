@@ -4,7 +4,8 @@ See experiments/barlow/README.md. Run from the repo root:
     python experiments/barlow/make_configs.py --smoke
     python experiments/barlow/make_configs.py --pilot
     python experiments/barlow/make_configs.py --pilot2
-    python experiments/barlow/make_configs.py --beta B --beta_proj BP
+    python experiments/barlow/make_configs.py --final
+    python experiments/barlow/make_configs.py --beta B --beta_proj BP   (c0-c5 full runs, superseded by --final)
 """
 import os, json, argparse
 
@@ -20,6 +21,12 @@ PILOT2_BETA    = 1e-3
 PILOT2_A_MAX   = 0.5
 PILOT2_TIE_D   = ["a", "w0", "psi"]
 PILOT2_LAMBDAS = [0.05, 0.5]
+# final runs (chosen from pilot 2): (condition, a_max, tie_D, lambda), 6000 epochs x SEEDS
+FINAL_ARMS = [("c0", None,         False, None),   # paper-setting baseline (single view, MSE)
+              ("c1", PILOT2_A_MAX, False, None),   # clamp
+              ("c2", PILOT2_A_MAX, False, 0.05),   # clamp + Barlow, lambda=0.05
+              ("c1", PILOT2_A_MAX, True,  None),   # clamp + tie
+              ("c2", PILOT2_A_MAX, True,  None)]   # clamp + tie + Barlow, lambda=5e-3
 
 def base_args(name, seed, save_root, data_root, epochs=6000):
     """ GDLNet paper settings (GDLNet-S, MoG order 1, untied), sigma in [10,40].
@@ -82,11 +89,29 @@ def make(name, cond, beta, seed, save_root, data_root, epochs=6000, smoke=False)
         args["train"]["fit"]["barlow"] = bt
     return args
 
+def variant_name(c, a_max, tie, lambd):
+    return c + (f"_amax{a_max:g}" if a_max else "") + ("_tieD" if tie else "") + (f"_lam{lambd:g}" if lambd else "")
+
+def make_variant(name, c, a_max, tie, lambd, seed, save_root, data_root, epochs):
+    """ make() for condition c (beta=PILOT2_BETA for c2) with envelope clamp a_max, shape tying
+    to D (PILOT2_TIE_D) and off-diagonal weight lambd (None -> default).
+    """
+    args = make(name, c, PILOT2_BETA, seed, save_root, data_root, epochs=epochs)
+    if a_max:
+        args["model"]["a_max"] = a_max
+    if tie:
+        args["model"]["tie_D"] = list(PILOT2_TIE_D)
+    if lambd:
+        args["train"]["fit"]["barlow"]["lambda"] = lambd
+    return args
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--smoke", action="store_true", help="tiny c0-c5 configs for a local end-to-end check.")
     mode.add_argument("--pilot", action="store_true", help=f"beta sweep {PILOT_BETAS} on c2, c4 (+ c0, c1 references), {PILOT_EPOCHS} epochs, seed 0.")
+    mode.add_argument("--final", action="store_true", help=f"the {len(FINAL_ARMS)} final arms (c0; c1, c2 with a_max={PILOT2_A_MAX:g}, "
+                      f"untied and tie_D) x seeds {SEEDS}, 6000 epochs.")
     mode.add_argument("--pilot2", action="store_true", help=f"c1, c2 (beta={PILOT2_BETA:g}) x a_max {{None, {PILOT2_A_MAX:g}}} x "
                       f"tie_D {{None, {PILOT2_TIE_D}}}, + clamped c2 at lambda {PILOT2_LAMBDAS}; {PILOT_EPOCHS} epochs, seed 0.")
     parser.add_argument("--beta", type=float, help="beta* for c2, c3 (full mode).")
@@ -120,16 +145,15 @@ def main():
         variants  = [(c, a_max, tie, None) for c in ["c1", "c2"] for a_max in [None, PILOT2_A_MAX] for tie in [False, True]] + \
                     [("c2", PILOT2_A_MAX, tie, lambd) for tie in [False, True] for lambd in PILOT2_LAMBDAS]
         for c, a_max, tie, lambd in variants:
-            name = f"pilot2_{c}" + (f"_amax{a_max:g}" if a_max else "") + ("_tieD" if tie else "") + \
-                   (f"_lam{lambd:g}" if lambd else "")
-            args = make(name, c, PILOT2_BETA, 0, save_root, ARGS.data_root, epochs=PILOT_EPOCHS)
-            if a_max:
-                args["model"]["a_max"] = a_max
-            if tie:
-                args["model"]["tie_D"] = list(PILOT2_TIE_D)
-            if lambd:
-                args["train"]["fit"]["barlow"]["lambda"] = lambd
-            configs[name] = args
+            name = "pilot2_" + variant_name(c, a_max, tie, lambd)
+            configs[name] = make_variant(name, c, a_max, tie, lambd, 0, save_root, ARGS.data_root, PILOT_EPOCHS)
+    elif ARGS.final:
+        out_dir   = os.path.join(here, "configs", "final")
+        save_root = ARGS.save_root or "trained_nets/barlow/final"
+        for c, a_max, tie, lambd in FINAL_ARMS:
+            for seed in ARGS.seeds:
+                name = f"final_{variant_name(c, a_max, tie, lambd)}_seed{seed}"
+                configs[name] = make_variant(name, c, a_max, tie, lambd, seed, save_root, ARGS.data_root, 6000)
     else:
         if ARGS.beta is None or ARGS.beta_proj is None:
             parser.error("full mode needs --beta and --beta_proj (choose them from the pilot).")

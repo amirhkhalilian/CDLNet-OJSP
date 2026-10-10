@@ -96,10 +96,24 @@ beta whose val/test PSNR stays within ~0.1 dB of c1.
       python experiments/barlow/make_configs.py --pilot2
       python train.py experiments/barlow/configs/pilot2/<run>.json
 
-**3. Full runs:** c0-c5 x seeds {0, 1} (12 runs, `trained_nets/barlow/`):
+**3. Final runs:** 5 arms chosen from pilot 2 x seeds {0, 1}, 6000 epochs
+(10 runs, `trained_nets/barlow/final/`). beta=1e-3 for c2, `a_max`=0.5, `tie_D`=[a, w0, psi]:
 
-    python experiments/barlow/make_configs.py --beta <beta*> --beta_proj <beta*_proj>
-    python train.py experiments/barlow/configs/full/<run>.json
+| Arm | Barlow | `a_max` | `tie_D` | lambda | Params |
+|---|---|---|---|---|---|
+| `c0` | - (single view, MSE; paper setting) | - | - | - | 70,980 |
+| `c1_amax0.5` | beta=0 (2 views) | 0.5 | - | - | 70,980 |
+| `c2_amax0.5_lam0.05` | beta=1e-3 | 0.5 | - | 0.05 | 70,980 |
+| `c1_amax0.5_tieD` | beta=0 (2 views) | 0.5 | a, w0, psi | - | 21,125 |
+| `c2_amax0.5_tieD` | beta=1e-3 | 0.5 | a, w0, psi | 5e-3 | 21,125 |
+
+Each config equals its pilot counterpart except seed, epochs and save path. Within a seed, all
+arms start from the same initial dictionary.
+
+    python experiments/barlow/make_configs.py --final
+    python train.py experiments/barlow/configs/final/<run>.json
+
+(The original c0-c5 full mode, `make_configs.py --beta B --beta_proj BP`, is superseded by `--final`.)
 
 **4. Analysis per run** (uses the `args.json` + `net.ckpt` that training writes to the run dir):
 
