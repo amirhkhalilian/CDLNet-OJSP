@@ -5,6 +5,7 @@ Each immediate subdirectory of runs_root with an args.json is a run. Run from th
     python experiments/barlow/aggregate.py trained_nets/barlow
 Reads per run: args.json, coherence/coherence.json (falls back to the last dict_metrics.jsonl
 entry), test_<test_set>_None.txt (from analyze.py --test), val.txt, barlow.txt, backtrack.txt.
+Runs are grouped by (condition, beta, lambda, a_max), seeds pooled.
 Writes to <runs_root>/aggregate (or --out): runs.csv, groups.csv, summary.md,
 tradeoff.png, training.png, layers.png.
 """
@@ -27,6 +28,15 @@ RC = {"figure.facecolor": SURFACE, "axes.facecolor": SURFACE, "savefig.facecolor
       "axes.spines.top": False, "axes.spines.right": False,
       "lines.linewidth": 2, "lines.markersize": 7, "legend.frameon": False,
       "legend.labelcolor": INK2, "font.size": 10}
+
+# summary keys read from coherence.json / dict_metrics.jsonl: (record name, bank, key)
+METRICS = [("A_n_dup", "A_mean", "n_dup_pairs"), ("A_n_dup_nc", "A_mean", "n_dup_pairs_nc"),
+           ("A_n_collapsed", "A_mean", "n_collapsed"), ("A_n_dead", "A_mean", "n_dead"),
+           ("A_mu_s", "A_mean", "mu_s"), ("A_mean_s", "A_mean", "mean_s"), ("A_mu_0", "A_mean", "mu_0"),
+           ("D_n_dup", "D", "n_dup_pairs"), ("D_n_dup_nc", "D", "n_dup_pairs_nc"),
+           ("D_n_collapsed", "D", "n_collapsed"), ("D_n_dead", "D", "n_dead"), ("D_mu_s", "D", "mu_s")]
+LAYER_KEYS = ["n_dup_pairs", "n_dup_pairs_nc", "n_collapsed", "n_dead"]  # per-layer A_k curves
+CURVE_KEYS = ["n_dup_pairs", "n_dup_pairs_nc", "n_collapsed", "n_dead"]  # A_mean over training
 
 # ----------------------------------------------------------------------------- loading
 
@@ -74,6 +84,8 @@ def read_dict_metrics(fn):
 def load_run(run_dir, test_set):
     args = json.load(open(os.path.join(run_dir, "args.json")))
     cond, beta, view, family = condition(args)
+    bt = args["train"]["fit"].get("barlow")
+    lambd = float(bt["lambda"]) if family != "ref" and "lambda" in bt else None
     dm = read_dict_metrics(os.path.join(run_dir, "dict_metrics.jsonl"))
     coh_fn = os.path.join(run_dir, "coherence", "coherence.json")
     if os.path.exists(coh_fn):
@@ -84,13 +96,13 @@ def load_run(run_dir, test_set):
         final, source = None, "none"
 
     r = {"run": os.path.basename(os.path.normpath(run_dir)), "cond": cond, "beta": beta,
+         "lambda": lambd, "a_max": args["model"].get("a_max"),
          "view": view, "family": family, "seed": args.get("seed"), "metrics_source": source}
     if final is not None:
-        r.update({"A_mu_s": final["A_mean"]["mu_s"], "A_n_dup": final["A_mean"]["n_dup_pairs"],
-                  "A_mean_s": final["A_mean"]["mean_s"], "A_mu_0": final["A_mean"]["mu_0"],
-                  "D_mu_s": final["D"]["mu_s"], "D_n_dup": final["D"]["n_dup_pairs"],
-                  "layers_mu_s": [a["mu_s"] for a in final["A"]],
-                  "layers_n_dup": [a["n_dup_pairs"] for a in final["A"]]})
+        for name, bank, key in METRICS:
+            r[name] = final[bank].get(key, np.nan)
+        for key in LAYER_KEYS:
+            r[f"layers_{key}"] = [a.get(key, np.nan) for a in final["A"]]
     val = read_floats(os.path.join(run_dir, "val.txt"))
     r["val_psnr"] = val[-1] if val else np.nan
     for s, p in read_test(os.path.join(run_dir, f"test_{test_set}_None.txt")).items():
@@ -102,24 +114,27 @@ def load_run(run_dir, test_set):
     r["n_backtracks"] = len(open(os.path.join(run_dir, "backtrack.txt")).read().split()) \
         if os.path.exists(os.path.join(run_dir, "backtrack.txt")) else 0
     r["curve_epoch"] = list(dm.keys())
-    r["curve_n_dup"] = [m["A_mean"]["n_dup_pairs"] for m in dm.values()]
-    r["curve_mu_s"]  = [m["A_mean"]["mu_s"] for m in dm.values()]
+    for key in CURVE_KEYS:
+        r[f"curve_{key}"] = [m["A_mean"].get(key, np.nan) for m in dm.values()]
     return r
 
 # ----------------------------------------------------------------------------- grouping
 
-SCALARS = ["A_mu_s", "A_n_dup", "A_mean_s", "A_mu_0", "D_mu_s", "D_n_dup", "val_psnr", "mean_Cii", "n_backtracks"]
+SCALARS = [name for name, _, _ in METRICS] + ["val_psnr", "mean_Cii", "n_backtracks"]
 
 def group_runs(runs):
-    """ groups keyed by (cond, beta), seeds pooled. Curves are averaged over the epochs all seeds share.
+    """ groups keyed by (cond, beta, lambda, a_max), seeds pooled.
+    Curves are averaged over the epochs all seeds share.
     """
     groups = {}
     for r in runs:
-        groups.setdefault((r["cond"], r["beta"]), []).append(r)
+        groups.setdefault((r["cond"], r["beta"], r["lambda"], r["a_max"]), []).append(r)
+    order = lambda kv: (kv[0][0], kv[0][3] or 0, kv[0][2] or 0, kv[0][1] or 0)
     out = []
-    for (cond, beta), rs in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1] or 0)):
-        g = {"cond": cond, "beta": beta, "view": rs[0]["view"], "family": rs[0]["family"],
-             "n": len(rs), "runs": rs, "seeds": sorted(r["seed"] for r in rs if r["seed"] is not None)}
+    for (cond, beta, lambd, a_max), rs in sorted(groups.items(), key=order):
+        g = {"cond": cond, "beta": beta, "lambda": lambd, "a_max": a_max,
+             "view": rs[0]["view"], "family": rs[0]["family"], "n": len(rs), "runs": rs,
+             "seeds": sorted(r["seed"] for r in rs if r["seed"] is not None)}
         keys = SCALARS + sorted({k for r in rs for k in r if k.startswith("psnr_")}, key=lambda k: float(k[5:]))
         for k in keys:
             v = np.array([r.get(k, np.nan) for r in rs], dtype=float)
@@ -127,19 +142,32 @@ def group_runs(runs):
             g[k + "_std"] = np.nanstd(v, ddof=1) if np.isfinite(v).sum() > 1 else np.nan
         common = sorted(set.intersection(*[set(r["curve_epoch"]) for r in rs]))
         g["curve_epoch"] = common
-        for c in ["curve_n_dup", "curve_mu_s"]:
-            g[c] = np.mean([[dict(zip(r["curve_epoch"], r[c]))[e] for e in common] for r in rs], axis=0) \
+        for key in CURVE_KEYS:
+            c = f"curve_{key}"
+            g[c] = np.nanmean([[dict(zip(r["curve_epoch"], r[c]))[e] for e in common] for r in rs], axis=0) \
                 if common else np.array([])
-        for c in ["layers_mu_s", "layers_n_dup"]:
-            g[c] = np.mean([r[c] for r in rs], axis=0) if all(c in r for r in rs) else None
+        for key in LAYER_KEYS:
+            c = f"layers_{key}"
+            g[c] = np.nanmean([r[c] for r in rs], axis=0) if all(c in r for r in rs) else None
         out.append(g)
     return out
 
-def label(g, groups):
-    """ condition name, with beta when that condition was swept.
+def variant(g, groups):
+    """ the parts of a group's setting that vary within its condition: beta, lambda; a_max when set.
     """
-    n_beta = len({h["beta"] for h in groups if h["cond"] == g["cond"]})
-    return g["cond"] if n_beta == 1 or g["beta"] is None else f"{g['cond']} β={g['beta']:g}"
+    same = [h for h in groups if h["cond"] == g["cond"]]
+    parts = []
+    if len({h["beta"] for h in same}) > 1 and g["beta"] is not None:
+        parts.append(f"β={g['beta']:g}")
+    if len({h["lambda"] for h in same}) > 1 and g["lambda"] is not None:
+        parts.append(f"λ={g['lambda']:.3g}")
+    if g["a_max"] is not None:
+        parts.append(f"a_max={g['a_max']:g}")  # no '|': labels go into markdown tables
+    return ", ".join(parts)
+
+def label(g, groups):
+    v = variant(g, groups)
+    return g["cond"] + (f" {v}" if v else "")
 
 # ----------------------------------------------------------------------------- tables
 
@@ -150,37 +178,43 @@ def fmt(g, k, digits=3):
     return f"{m:.{digits}f}" + (f" ± {s:.{digits}f}" if np.isfinite(s) else "")
 
 def write_tables(runs, groups, out_dir, psnr_keys):
-    run_cols = ["run", "cond", "beta", "view", "seed", "metrics_source"] + SCALARS + psnr_keys
+    meta = ["cond", "beta", "lambda", "a_max", "view"]
+    run_cols = ["run"] + meta + ["seed", "metrics_source"] + SCALARS + psnr_keys
     with open(os.path.join(out_dir, "runs.csv"), "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(run_cols)
         for r in runs:
             w.writerow([r.get(k, "") for k in run_cols])
 
-    grp_cols = ["cond", "beta", "view", "n"] + [k + s for k in SCALARS + psnr_keys for s in ["", "_std"]]
+    grp_cols = meta + ["n"] + [k + s for k in SCALARS + psnr_keys for s in ["", "_std"]]
     with open(os.path.join(out_dir, "groups.csv"), "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(grp_cols)
         for g in groups:
             w.writerow([g.get(k, "") for k in grp_cols])
 
-    head = ["group", "n", "μ_s(A)", "n_dup(A)", "μ_0(A)", "μ_s(D)", "n_dup(D)", "val PSNR"] + \
-           [f"PSNR σ={k[5:]}" for k in psnr_keys] + ["mean C_ii", "backtracks"]
+    cols = [("n_dup(A)", "A_n_dup", 1), ("n_dup nc(A)", "A_n_dup_nc", 1), ("collapsed(A)", "A_n_collapsed", 1),
+            ("dead(A)", "A_n_dead", 1), ("n_dup(D)", "D_n_dup", 1), ("dead(D)", "D_n_dead", 1),
+            ("μ_s(A)", "A_mu_s", 3), ("val PSNR", "val_psnr", 2)] + \
+           [(f"PSNR σ={k[5:]}", k, 2) for k in psnr_keys] + [("mean C_ii", "mean_Cii", 3), ("backtracks", "n_backtracks", 1)]
+    head = ["group", "n"] + [c[0] for c in cols]
     lines = ["| " + " | ".join(head) + " |", "|" + "---|"*len(head)]
     for g in groups:
-        row = [label(g, groups), str(g["n"]), fmt(g, "A_mu_s"), fmt(g, "A_n_dup", 1), fmt(g, "A_mu_0"),
-               fmt(g, "D_mu_s"), fmt(g, "D_n_dup", 1), fmt(g, "val_psnr", 2)] + \
-              [fmt(g, k, 2) for k in psnr_keys] + [fmt(g, "mean_Cii"), fmt(g, "n_backtracks", 1)]
+        row = [label(g, groups), str(g["n"])] + [fmt(g, k, d) for _, k, d in cols]
         lines.append("| " + " | ".join(row) + " |")
     table = "\n".join(lines)
     with open(os.path.join(out_dir, "summary.md"), "w") as f:
-        f.write(f"mean ± std over seeds (n runs per group). Metrics on analysis filters A are means over layers k.\n\n{table}\n")
+        f.write("mean ± std over seeds (n runs per group). Metrics on analysis filters A are means over layers k.\n"
+                "n_dup: near-duplicate pairs (shift-coherence > thresh); nc: among non-collapsed atoms only; "
+                "collapsed: energy std < collapse_px on every axis; dead: subbands active on < dead_thresh "
+                "of code coefficients on the analyze.py --test images.\n\n" + table + "\n")
     return table
 
 # ----------------------------------------------------------------------------- figures
 
 def legend_handles(groups):
-    """ family (color) x view (marker/line) legend entries for the groups present.
+    """ family (color) x view (marker/line) legend entries for the groups present,
+    plus a hollow-marker entry for envelope-clamped (a_max) groups.
     """
     from matplotlib.lines import Line2D
     names = {"ref": "no Barlow", "noproj": "Barlow", "proj": "Barlow + projector"}
@@ -194,66 +228,81 @@ def legend_handles(groups):
         m, ls = VIEW_STYLE[g["view"]]
         hs.append(Line2D([], [], color=FAMILY_COLOR[g["family"]], marker=m, linestyle=ls,
                          label=f"{names[g['family']]}, {views[g['view']]} ({g['cond']})"))
+    if any(g["a_max"] is not None for g in groups):
+        hs.append(Line2D([], [], color=INK2, marker="o", linestyle="none", markerfacecolor=SURFACE,
+                         label="hollow: envelope clamped (|a| ≤ a_max)"))
     return hs
 
 def plot_tradeoff(groups, out_dir, psnr_key):
-    """ PSNR vs redundancy of A, one point per group (error bars over seeds), beta sweeps connected.
+    """ PSNR vs redundancy of A, one point per group (error bars over seeds).
+    Beta sweeps sharing (cond, lambda, a_max) are connected.
     """
     ylab = f"test PSNR, σ={psnr_key[5:]} (dB)" if psnr_key != "val_psnr" else "final val PSNR (dB)"
+    panels = [("A_n_dup", "near-dup pairs in A"), ("A_n_dup_nc", "near-dup pairs, non-collapsed atoms"),
+              ("A_n_dead", "dead subbands in A")]
+    panels = [p for p in panels if any(np.isfinite(g[p[0]]) for g in groups)]
     with plt.rc_context(RC):
-        fig, axs = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
-        for ax, (xk, xlab) in zip(axs, [("A_mu_s", "μ_s(A), mean over k  (lower = more diverse)"),
-                                        ("A_n_dup", "near-duplicate pairs in A, mean over k")]):
-            for cond in sorted({g["cond"] for g in groups}):
-                gs = sorted([g for g in groups if g["cond"] == cond], key=lambda g: g["beta"] or 0)
+        fig, axs = plt.subplots(1, len(panels), figsize=(5*len(panels), 4), sharey=True, squeeze=False)
+        for ax, (xk, xlab) in zip(axs[0], panels):
+            series = sorted({(g["cond"], g["lambda"] or 0, g["a_max"] or 0) for g in groups})
+            for cond, lambd, a_max in series:
+                gs = sorted([g for g in groups if (g["cond"], g["lambda"] or 0, g["a_max"] or 0) == (cond, lambd, a_max)],
+                            key=lambda g: g["beta"] or 0)
                 c = FAMILY_COLOR[gs[0]["family"]]
                 m, ls = VIEW_STYLE[gs[0]["view"]]
                 x = np.array([g[xk] for g in gs]); y = np.array([g[psnr_key] for g in gs])
                 ax.errorbar(x, y, xerr=[g[xk + "_std"] for g in gs], yerr=[g[psnr_key + "_std"] for g in gs],
                             color=c, marker=m, linestyle=ls if len(gs) > 1 else "none", linewidth=1.5,
-                            markersize=8, markeredgecolor=SURFACE, markeredgewidth=1.5, capsize=0, elinewidth=1)
-                if len(gs) > 1: # label sweep endpoints only, the line gives the order
-                    for g, xi, yi in [(gs[0], x[0], y[0]), (gs[-1], x[-1], y[-1])]:
-                        ax.annotate(f"β={g['beta']:g}", (xi, yi), textcoords="offset points", xytext=(6, 4),
-                                    fontsize=8, color=INK2)
-            ax.set_xlabel(xlab)
-        axs[0].set_ylabel(ylab)
+                            markersize=8, markeredgewidth=1.5, capsize=0, elinewidth=1,
+                            markeredgecolor=c if a_max else SURFACE, markerfacecolor=SURFACE if a_max else c)
+                # label sweep endpoints (the line gives the order), and single points that are a variant
+                ends = [(gs[0], x[0], y[0]), (gs[-1], x[-1], y[-1])] if len(gs) > 1 else [(gs[0], x[0], y[0])]
+                for g, xi, yi in ends:
+                    v = variant(g, groups)
+                    if v and np.isfinite(xi) and np.isfinite(yi):
+                        ax.annotate(v, (xi, yi), textcoords="offset points", xytext=(6, 4), fontsize=8, color=INK2)
+            ax.set_xlabel(xlab + ", mean over k")
+        axs[0, 0].set_ylabel(ylab)
         fig.subplots_adjust(bottom=0.3)
         fig.legend(handles=legend_handles(groups), loc="lower center", ncol=2, bbox_to_anchor=(0.5, 0.0))
-        fig.suptitle("Denoising vs dictionary redundancy", color=INK)
+        fig.suptitle("Denoising vs dictionary redundancy (lower x = more diverse)", color=INK)
         fn = os.path.join(out_dir, "tradeoff.png")
         fig.savefig(fn, dpi=200, bbox_inches="tight")
         plt.close(fig)
     return fn
 
 def plot_facets(groups, out_dir, fn_name, xkey, rows, xlabel, title):
-    """ one column per Barlow condition (c2..c5), its beta(s) in the blue ramp, c0/c1 as gray references.
-    rows: list of (ykey, ylabel).
+    """ one column per Barlow condition (c2..c5), its settings in the blue ramp,
+    c0/c1 as gray references (lighter gray when envelope-clamped). rows: list of (ykey, ylabel).
     """
+    has = lambda g, yk: g[yk] is not None and len(g[yk]) > 0 and np.isfinite(g[yk]).any()
+    rows  = [(yk, yl) for yk, yl in rows if any(has(g, yk) for g in groups)]
     refs  = [g for g in groups if g["family"] == "ref"]
     conds = sorted({g["cond"] for g in groups if g["family"] != "ref"}) or ["references"]
     with plt.rc_context(RC):
         fig, axs = plt.subplots(len(rows), len(conds), figsize=(4.2*len(conds), 3.2*len(rows)),
                                 sharex=True, sharey="row", squeeze=False)
         for j, cond in enumerate(conds):
-            gs = sorted([g for g in groups if g["cond"] == cond], key=lambda g: g["beta"])
+            gs = [g for g in groups if g["cond"] == cond]  # already ordered by a_max, lambda, beta
             ramp = BLUE_RAMP if len(gs) > 1 else [FAMILY_COLOR["noproj"]]
             idx  = np.linspace(0, len(ramp)-1, len(gs)).round().astype(int) if gs else []
             for i, (yk, ylab) in enumerate(rows):
                 ax = axs[i, j]
                 for g in refs:
-                    x = g[xkey] if xkey != "layer" else np.arange(len(g[yk])) if g[yk] is not None else []
-                    if g[yk] is None or len(g[yk]) == 0:
-                        continue
-                    m, ls = VIEW_STYLE[g["view"]]
-                    ax.plot(x, g[yk], color=INK2, linestyle=ls, linewidth=1.5, label=label(g, groups))
-                for g, k in zip(gs, idx):
-                    if g[yk] is None or len(g[yk]) == 0:
+                    if not has(g, yk):
                         continue
                     x = g[xkey] if xkey != "layer" else np.arange(len(g[yk]))
-                    ax.plot(x, g[yk], color=ramp[k], label=f"β={g['beta']:g}" if len(gs) > 1 else "Barlow")
+                    ax.plot(x, g[yk], color=MUTED if g["a_max"] is not None else INK2,
+                            linestyle=VIEW_STYLE[g["view"]][1], linewidth=1.5, label=label(g, groups))
+                for g, k in zip(gs, idx):
+                    if not has(g, yk):
+                        continue
+                    x = g[xkey] if xkey != "layer" else np.arange(len(g[yk]))
+                    ax.plot(x, g[yk], color=ramp[k], label=variant(g, groups) or "Barlow")
                 if i == 0:
-                    ax.set_title(cond if len(gs) != 1 else f"{cond} (β={gs[0]['beta']:g})")
+                    v = variant(gs[0], groups) if len(gs) == 1 else ""
+                    single_beta = f"β={gs[0]['beta']:g}" if len(gs) == 1 and gs[0]["beta"] is not None else ""
+                    ax.set_title(cond + (f" ({', '.join(p for p in [single_beta, v] if p)})" if single_beta or v else ""))
                 if j == 0:
                     ax.set_ylabel(ylab)
                 if i == len(rows) - 1:
@@ -301,14 +350,18 @@ def main():
     missing = [r["run"] for r in runs if r["metrics_source"] != "coherence"]
     if missing:
         print(f"no coherence/coherence.json (using last dict_metrics.jsonl entry) for: {missing}")
+    no_dead = [r["run"] for r in runs if not np.isfinite(r.get("A_n_dead", np.nan))]
+    if no_dead:
+        print(f"no dead-subband counts (re-run analyze.py with --test and --coherence) for: {no_dead}")
 
     table = write_tables(runs, groups, out_dir, psnr_keys)
+    rows = [("n_dup_pairs", "near-dup pairs in A"), ("n_dup_pairs_nc", "near-dup pairs, non-collapsed"),
+            ("n_collapsed", "collapsed atoms in A"), ("n_dead", "dead subbands in A")]
     figs = [plot_tradeoff(groups, out_dir, psnr_key),
             plot_facets(groups, out_dir, "training.png", "curve_epoch",
-                        [("curve_n_dup", "near-dup pairs in A"), ("curve_mu_s", "μ_s(A)")],
-                        "epoch", "Redundancy of A during training (mean over k)"),
+                        [(f"curve_{k}", l) for k, l in rows], "epoch", "Redundancy of A during training (mean over k)"),
             plot_facets(groups, out_dir, "layers.png", "layer",
-                        [("layers_mu_s", "μ_s(A_k)"), ("layers_n_dup", "near-dup pairs in A_k")],
+                        [(f"layers_{k}", l.replace(" in A", " in A_k")) for k, l in rows],
                         "k (iteration)", "Final redundancy per layer")]
 
     print(f"{len(runs)} runs in {len(groups)} groups from {ARGS.runs_root}\n")

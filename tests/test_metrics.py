@@ -5,7 +5,8 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import torch
-from model.metrics import xcorr, shift_coherence, dict_summary, net_dict_metrics, peak_frequency, freq_order
+from model.metrics import xcorr, shift_coherence, dict_summary, net_dict_metrics, peak_frequency, freq_order, \
+    effective_support, code_activity
 from model.net import CDLNet, GDLNet
 
 def brute_force_sc(W):
@@ -109,6 +110,58 @@ def test_peak_frequency():
     assert abs(theta[3] - np.pi/4) < 0.2, theta
     order = freq_order(W)
     assert order[0] == 0 and sorted(order) == [0,1,2,3]
+
+def gauss_atom(P, sy, sx, theta=0.0):
+    """ atom whose energy is a gaussian with std (sy, sx) pixels, rotated by theta.
+    """
+    y, x = torch.meshgrid(torch.arange(P).float(), torch.arange(P).float(), indexing='ij')
+    y, x = y - (P-1)/2, x - (P-1)/2
+    u =  np.cos(theta)*y + np.sin(theta)*x
+    v = -np.sin(theta)*y + np.cos(theta)*x
+    return torch.exp(-(u**2/(4*sy**2) + v**2/(4*sx**2)))  # squared -> energy std (sy, sx)
+
+def test_effective_support():
+    P = 21
+    W = torch.stack([gauss_atom(P, 2.0, 0.7), gauss_atom(P, 0.7, 2.0), gauss_atom(P, 2.0, 0.7, np.pi/4)])[:,None]
+    W = torch.cat([W, torch.zeros(1,1,P,P)])
+    W[3,0,10,10] = 1                                 # spike
+    smaj, smin = effective_support(W)
+    assert torch.allclose(smaj[:3], torch.tensor(2.0), atol=0.02), smaj
+    assert torch.allclose(smin[:3], torch.tensor(0.7), atol=0.02), smin  # rotation invariant
+    assert smaj[3] == 0 and smin[3] == 0
+    # scale and sign invariant
+    assert torch.allclose(effective_support(-3*W)[0], smaj)
+
+def test_collapsed_counts():
+    torch.manual_seed(0)
+    P = 11
+    W = torch.zeros(6, 1, P, P)
+    W[0,0,5,5] = 1; W[1,0,5,5] = -2                  # two spikes: collapsed duplicates
+    W[2,0] = gauss_atom(P, 0.5, 0.5)                 # small blob: collapsed
+    W[3,0] = gauss_atom(P, 2.0, 0.4)                 # thin line: not collapsed (long on one axis)
+    W[4,0] = gauss_atom(P, 1.5, 1.5)*torch.cos(torch.arange(P).float())[None,:]  # gabor
+    W[5,0] = -W[4,0]                                 # duplicate of the gabor
+    s = dict_summary(W, thresh=0.9, collapse_px=0.8)
+    assert s["n_collapsed"] == 3, s
+    assert s["n_dup_pairs_nc"] == 1 and s["n_dup_atoms_nc"] == 2, s  # only the gabor pair
+    assert s["n_dup_pairs"] >= 2  # spikes + gabor pair (+ spike/blob)
+
+def test_code_activity():
+    torch.manual_seed(0)
+    net = GDLNet(K=3, M=8, P=7, s=2, adaptive=True, init=False)
+    with torch.no_grad():
+        net.t.zero_(); net.t[:, 0, 3] = 1e6          # subband 3 thresholded away at every iteration
+    # a real DataLoader: iterating it draws a base seed from the global RNG
+    loader = torch.utils.data.DataLoader(torch.rand(3, 1, 32, 32), batch_size=2, shuffle=False)
+    rng = torch.random.get_rng_state()
+    act = code_activity(net, loader, sigma=25)
+    assert torch.equal(rng, torch.random.get_rng_state())  # global RNG untouched
+    assert torch.equal(act, code_activity(net, loader, sigma=25))  # deterministic
+    assert act.shape == (3, 8) and torch.all(act[:, 3] == 0)
+    assert torch.all(act[:, [0,1,2,4,5,6,7]] > 0.9)  # zero thresholds: (almost) all coefficients active
+    m = net_dict_metrics(net, activity=act)
+    assert all(a["n_dead"] == 1 for a in m["A"]) and m["D"]["n_dead"] == 1 and m["A_mean"]["n_dead"] == 1
+    assert "n_dead" not in net_dict_metrics(net)["A_mean"]
 
 if __name__ == "__main__":
     tests = [(n, f) for n, f in list(globals().items()) if n.startswith("test_")]

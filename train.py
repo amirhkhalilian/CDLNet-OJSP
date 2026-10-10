@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from model.net import CDLNet, GDLNet, DnCNN, FFDNet
 from model.barlow import sample_pixels, codes_to_rows, barlow_loss, Projector
-from model.metrics import net_dict_metrics
+from model.metrics import net_dict_metrics, code_activity
 from data import get_fit_loaders
 from utils import awgn, gen_bayer_mask
 
@@ -79,6 +79,7 @@ def fit(net, opt, loaders,
 
     if not type(noise_std) in [list, tuple]:
         noise_std = (noise_std, noise_std)
+    val_nstd = (noise_std[0]+noise_std[1])/2.0
 
     # two noisy views per training batch: MSE on both + beta * barlow(codes)
     two_view = False
@@ -104,7 +105,7 @@ def fit(net, opt, loaders,
     ckpt_path = os.path.join(save_dir, '0.ckpt')
     save_ckpt(ckpt_path, net, 0, opt, sched)
     if has_dict:
-        write_dict_metrics(dict_path, net, start_epoch - 1)
+        write_dict_metrics(dict_path, net, start_epoch - 1, loaders.get('val'), val_nstd)
 
     top_psnr = {"train": 0, "val": 0, "test": 0} # for backtracking
     epoch = start_epoch
@@ -221,7 +222,7 @@ def fit(net, opt, loaders,
             continue
 
         if has_dict and (epoch % val_freq == 0 or epoch == start_epoch + epochs - 1):
-            write_dict_metrics(dict_path, net, epoch)
+            write_dict_metrics(dict_path, net, epoch, loaders.get('val'), val_nstd)
 
         if sched is not None:
             sched.step()
@@ -248,12 +249,15 @@ def write_barlow_log(path, epoch, vals):
             log_file.write("epoch, mse, barlow, on, off, mean_Cii\n")
         log_file.write(f"{epoch}, " + ", ".join(f"{v:.6e}" for v in vals) + "\n")
 
-def write_dict_metrics(path, net, epoch):
+def write_dict_metrics(path, net, epoch, loader=None, sigma=25):
     """ append dictionary redundancy metrics of net at epoch to path (json lines).
+    With a loader, dead subbands are counted from code activity on its images at noise-level sigma.
     """
-    m = net_dict_metrics(net)
-    print(f"DICT: mu_s(A)={m['A_mean']['mu_s']:.3f}, n_dup(A)={m['A_mean']['n_dup_pairs']:.1f} | "
-          f"mu_s(D)={m['D']['mu_s']:.3f}, n_dup(D)={m['D']['n_dup_pairs']}")
+    activity = code_activity(net, loader, sigma) if loader is not None else None
+    m = net_dict_metrics(net, activity=activity)
+    dead = f", n_dead(A)={m['A_mean']['n_dead']:.1f}" if activity is not None else ""
+    print(f"DICT: n_dup(A)={m['A_mean']['n_dup_pairs']:.1f}, n_dup_nc(A)={m['A_mean']['n_dup_pairs_nc']:.1f}, "
+          f"n_collapsed(A)={m['A_mean']['n_collapsed']:.1f}{dead} | n_dup(D)={m['D']['n_dup_pairs']}")
     with open(path, 'a') as log_file:
         log_file.write(json.dumps({"epoch": epoch, **m}) + "\n")
 

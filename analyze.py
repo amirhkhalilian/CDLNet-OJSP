@@ -12,7 +12,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 import model
 import model.nle
-from model.metrics import get_filters, shift_coherence, freq_order, net_dict_metrics
+from model.metrics import get_filters, shift_coherence, freq_order, net_dict_metrics, code_activity
 import utils, data, train
 
 import argparse
@@ -28,6 +28,8 @@ parser.add_argument("--thresholds", action="store_true", help="Plot network thre
 parser.add_argument("--filters", action="store_true", help="Save network A,B filterbanks.")
 parser.add_argument("--coherence", action="store_true", help="Save shift-coherence heatmaps, histogram, per-layer curves, and summary json.")
 parser.add_argument("--dup_thresh", type=float, help="Shift-coherence threshold for near-duplicate atoms.", default=0.9)
+parser.add_argument("--collapse_px", type=float, help="Energy std (pixels) below which an atom counts as collapsed.", default=0.8)
+parser.add_argument("--activity_sigma", type=float, help="Noise-level for code activity (dead subbands) on the --test images.", default=25)
 parser.add_argument("--save_dir", type=str, help="Where to save analyze results.", default=None)
 parser.add_argument("--color", action="store_true", help="Use color images.")
 parser.add_argument("--demosaic", action="store_true", help="Demosaicing problem.")
@@ -51,6 +53,7 @@ def main(model_args):
     if ARGS.noise_level == -1:
         ARGS.noise_level = model_args['train']['fit']['noise_std']
 
+    loader = None
     with torch.no_grad():
         if ARGS.test is not None:
             loader = data.get_data_loader([ARGS.test], load_color=ARGS.color, test=True)
@@ -69,7 +72,8 @@ def main(model_args):
             filters(net, scale_each=True)
 
         if ARGS.coherence:
-            coherence(net, thresh=ARGS.dup_thresh, epoch=epoch0)
+            coherence(net, thresh=ARGS.dup_thresh, epoch=epoch0, collapse_px=ARGS.collapse_px,
+                      loader=loader, sigma=ARGS.activity_sigma)
 
 def test(net, loader, noise_level=25, blind=False, device=torch.device('cpu')):
     """ Evaluate net on test-set.
@@ -187,9 +191,10 @@ def filters(net, scale_each=False):
     save_image(D, fn, nrow=n, scale_each=scale_each, normalize=True)
     print("done.")
 
-def coherence(net, thresh=0.9, epoch=None):
+def coherence(net, thresh=0.9, epoch=None, collapse_px=0.8, loader=None, sigma=25):
     """ Saves shift-coherence heatmaps (A_{K-1}, D), histogram, per-layer curves,
     and summary json of dictionary redundancy metrics.
+    With a loader, dead subbands are counted from code activity on its images at noise-level sigma.
     """
     print("--------- coherence ---------")
     if not (hasattr(net, 'A') and hasattr(net, 'D')):
@@ -197,7 +202,14 @@ def coherence(net, thresh=0.9, epoch=None):
     save_dir = os.path.join(ARGS.save_dir, "coherence")
     os.makedirs(save_dir, exist_ok=True)
 
-    m = net_dict_metrics(net, thresh)
+    if loader is None:
+        print("no --test images given: dead-subband counts (n_dead) are skipped.")
+        activity = None
+    else:
+        print(f"code activity on {loader.dataset.root_dirs} at sigma={sigma} ...")
+        activity = code_activity(net, loader, sigma)
+    m = net_dict_metrics(net, thresh, collapse_px, activity=activity)
+    m["activity_sigma"] = sigma if activity is not None else None
     fn = os.path.join(save_dir, "coherence.json")
     print(f"Saving summary to {fn} ...")
     with open(fn, 'w') as json_file:
@@ -241,7 +253,7 @@ def coherence(net, thresh=0.9, epoch=None):
 
     # per-layer curves
     k = np.arange(net.K)
-    fig, axs = plt.subplots(1, 2, figsize=(10, 3.5))
+    fig, axs = plt.subplots(1, 3, figsize=(15, 3.5))
     axs[0].plot(k, [a["mu_s"] for a in m["A"]], 'o-', label="A max")
     axs[0].plot(k, [a["mean_s"] for a in m["A"]], 's-', label="A mean")
     axs[0].axhline(m["D"]["mu_s"], color='C0', linestyle='--', label="D max")
@@ -250,18 +262,30 @@ def coherence(net, thresh=0.9, epoch=None):
     axs[0].set_ylabel("shift-coherence")
     axs[0].set_ylim(0, 1.05)
     axs[0].legend(loc='lower center', ncol=2)
-    axs[1].plot(k, [a["n_dup_pairs"] for a in m["A"]], 'o-', label="A")
-    axs[1].axhline(m["D"]["n_dup_pairs"], color='C0', linestyle='--', label="D")
+    axs[1].plot(k, [a["n_dup_pairs"] for a in m["A"]], 'o-', label="A all")
+    axs[1].plot(k, [a["n_dup_pairs_nc"] for a in m["A"]], 's-', label="A non-collapsed")
+    axs[1].axhline(m["D"]["n_dup_pairs"], color='C0', linestyle='--', label="D all")
+    axs[1].axhline(m["D"]["n_dup_pairs_nc"], color='C1', linestyle='--', label="D non-collapsed")
     axs[1].set_xlabel("k (iteration)")
     axs[1].set_ylabel(f"near-duplicate pairs (SC > {thresh})")
     axs[1].legend()
+    axs[2].plot(k, [a["n_collapsed"] for a in m["A"]], 'o-', label=f"A collapsed (< {collapse_px}px)")
+    axs[2].axhline(m["D"]["n_collapsed"], color='C0', linestyle='--', label="D collapsed")
+    if activity is not None:
+        axs[2].plot(k, [a["n_dead"] for a in m["A"]], 's-', label=f"A dead (σ={sigma})")
+        axs[2].axhline(m["D"]["n_dead"], color='C1', linestyle='--', label="D dead")
+    axs[2].set_xlabel("k (iteration)")
+    axs[2].set_ylabel(f"atoms (of {net.M})")
+    axs[2].legend()
     fn = os.path.join(save_dir, "sc_layers.png")
     print(f"Saving {fn} ...")
     plt.savefig(fn, dpi=300, bbox_inches='tight')
     plt.close()
 
-    print(f"A (mean over k): mu_s={m['A_mean']['mu_s']:.3f}, n_dup_pairs={m['A_mean']['n_dup_pairs']:.1f}")
-    print(f"D:               mu_s={m['D']['mu_s']:.3f}, n_dup_pairs={m['D']['n_dup_pairs']}")
+    for name, s in [("A (mean over k)", m["A_mean"]), ("D", m["D"])]:
+        dead = f", n_dead={s['n_dead']:.1f}" if "n_dead" in s else ""
+        print(f"{name:16s} n_dup_pairs={s['n_dup_pairs']:.1f}, n_dup_pairs_nc={s['n_dup_pairs_nc']:.1f}, "
+              f"n_collapsed={s['n_collapsed']:.1f}{dead}, mu_s={s['mu_s']:.3f}")
     print("done.")
 
 def dictionary(net):

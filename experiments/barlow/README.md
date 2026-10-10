@@ -36,12 +36,23 @@ Validation/test always use a single noisy view, so PSNR is comparable across con
 ## Metrics
 
 Primary (analysis filters `A_k`, averaged over k), from `model/metrics.py`:
-- `mu_s`: max off-diagonal shift-coherence `max_tau |<a_i, S_tau a_j>|` of unit-norm atoms.
-- `n_dup_pairs`: number of atom pairs with shift-coherence > 0.9.
+- `n_dup_pairs`: number of atom pairs with shift-coherence `max_tau |<a_i, S_tau a_j>|` > 0.9.
+- `n_dup_pairs_nc`: the same, among non-collapsed atoms only.
+- `n_collapsed`: atoms whose energy std is < 0.8 px along every axis (`effective_support`):
+  spikes and 1-3 px blobs, which are near-identical whatever their Gabor frequency/phase.
+- `n_dead`: subbands active on < 1e-3 of code coefficients (`code_activity`), on the
+  `analyze.py --test` images at sigma=25 (`--activity_sigma`), or on the validation images at the
+  mid-range sigma during training.
 
-Also reported: mean shift-coherence, zero-shift coherence `mu_0` (separates true duplicates
-from shifted/quadrature pairs), the same metrics for the final dictionary `D`, and test PSNR
-at sigma in {5, 15, 25, 35, 50} (5 and 50 are outside the training range).
+Also reported: `mu_s` (max shift-coherence; saturated at ~0.998 in the pilot, so not a headline),
+mean shift-coherence, zero-shift coherence `mu_0` (separates true duplicates from shifted/quadrature
+pairs), the same metrics for the final dictionary `D`, and test PSNR at sigma in {5, 15, 25, 35, 50}
+(5 and 50 are outside the training range).
+
+Envelope clamp: `model.a_max` bounds the Gabor envelope precision `|a| <= a_max` per axis
+(at init and in `project()`), i.e. envelope energy std >= ~1/(2 a_max) px. Clamped `randn` init puts
+many atoms at the bound, so pick `a_max` with margin below `1/(2 * 0.8) = 0.625` (e.g. 0.5 -> >= 1 px)
+for clamped runs to have no collapsed atoms by the metric.
 
 Note: the Barlow term sends no gradient to `D` (it only appears in `x_hat = D z`), so the
 analysis filters are where its effect is expected.

@@ -117,6 +117,7 @@ class GDLNet(nn.Module):
                  order = 1,        # mixture of gabor order
                  adaptive = False, # noise-adaptive thresholds
                  shared = "",      # which gabor parameters to share (e.g. "a_psi_w0_alpha")
+                 a_max = None,     # bound on gabor envelope precision |a| (None -> unbounded)
                  init = True):     # False -> use power-method for weight init
         super(GDLNet, self).__init__()
         
@@ -159,6 +160,11 @@ class GDLNet(nn.Module):
                     self.A[k].psi   = self.A[0].psi
                     self.B[k].psi   = self.B[0].psi
 
+        # set before clamping and spectral normalization, which use it
+        self.K = K
+        self.a_max = a_max
+        self.clamp_envelope()
+
         # Don't bother running code if initializing trained model from state-dict
         if init:
             print("Running power-method on initial dictionary...")
@@ -189,14 +195,26 @@ class GDLNet(nn.Module):
         self.adaptive = adaptive
 
     @torch.no_grad()
-    def project(self):
-        """ \ell_2 ball projection for filters, R_+ projection for thresholds
+    def clamp_envelope(self):
+        """ clamp gabor envelope precision to |a| <= a_max (per axis), i.e. envelope
+        energy std >= 1/(2 a_max) pixels, preventing collapse to spike/point-like atoms.
         """
-        self.t.clamp_(0.0) 
+        if self.a_max is None:
+            return
+        for k in range(self.K):
+            self.A[k].a.clamp_(-self.a_max, self.a_max)
+            self.B[k].a.clamp_(-self.a_max, self.a_max)
+
+    @torch.no_grad()
+    def project(self):
+        """ R_+ projection for thresholds, |a| <= a_max for gabor envelopes
+        """
+        self.t.clamp_(0.0)
+        self.clamp_envelope()
 
     def forward(self, y, sigma=None, mask=1):
         """ LISTA + D w/ noise-adaptive thresholds
-        """ 
+        """
         yp, params, mask = pre_process(y, self.s, mask=mask)
 
         # THRESHOLD SCALE-FACTOR c
