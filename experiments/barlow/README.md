@@ -84,6 +84,18 @@ references, 300 epochs, seed 0 (12 runs, `trained_nets/barlow/pilot/`):
 Pick beta\* (and beta\*_proj) from the PSNR vs `mu_s` / `n_dup_pairs` trade-off: the largest
 beta whose val/test PSNR stays within ~0.1 dB of c1.
 
+**2b. Pilot 2: envelope clamp and tying to D.** Pilot 1 found the redundancy dominated by collapsed
+(spike/blob) atoms, and no Barlow effect on `D`. 300 epochs, seed 0, beta=1e-3 for c2
+(12 runs, `trained_nets/barlow/pilot2/`):
+- c1, c2 x `a_max` {none, 0.5} x `tie_D` {none, [a, w0, psi]} (8 runs; `pilot2_c1`, `pilot2_c2`
+  re-run pilot 1's `pilot_c1`, `pilot_c2_beta0.001` with identical configs: run-to-run noise floor),
+- clamped c2 at lambda {0.05, 0.5}, untied and tied (4 runs; with the lambda=5e-3 runs, a 3-point sweep).
+  Larger lambda also scales the whole Barlow term (about 12x at lambda=0.5 at init), not only its
+  off-diagonal share.
+
+      python experiments/barlow/make_configs.py --pilot2
+      python train.py experiments/barlow/configs/pilot2/<run>.json
+
 **3. Full runs:** c0-c5 x seeds {0, 1} (12 runs, `trained_nets/barlow/`):
 
     python experiments/barlow/make_configs.py --beta <beta*> --beta_proj <beta*_proj>

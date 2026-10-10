@@ -1,0 +1,66 @@
+{
+    "model": {
+        "C": 1,
+        "K": 30,
+        "M": 169,
+        "P": 11,
+        "a_max": 0.5,
+        "adaptive": true,
+        "order": 1,
+        "s": 2,
+        "tie_D": [
+            "a",
+            "w0",
+            "psi"
+        ]
+    },
+    "paths": {
+        "ckpt": null,
+        "save": "trained_nets/barlow/pilot2/pilot2_c2_amax0.5_tieD"
+    },
+    "seed": 0,
+    "train": {
+        "fit": {
+            "backtrack_thresh": 2,
+            "barlow": {
+                "beta": 0.001,
+                "lambda": 0.005,
+                "view_sigma": "same",
+                "views": 2
+            },
+            "clip_grad": 0.05,
+            "demosaic": false,
+            "epochs": 300,
+            "mcsure": false,
+            "noise_std": [
+                10,
+                40
+            ],
+            "save_freq": 5,
+            "val_freq": 50,
+            "verbose": true
+        },
+        "loaders": {
+            "batch_size": 10,
+            "crop_size": 128,
+            "load_color": false,
+            "trn_path_list": [
+                "dataset/CBSD432"
+            ],
+            "tst_path_list": [
+                "dataset/CBSD68"
+            ],
+            "val_path_list": [
+                "dataset/Kodak"
+            ]
+        },
+        "opt": {
+            "lr": 0.001
+        },
+        "sched": {
+            "gamma": 0.95,
+            "step_size": 50
+        }
+    },
+    "type": "GDLNet"
+}
