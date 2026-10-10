@@ -6,3 +6,5 @@ manuscript/
 *.pdf
 *.png
 *jpeg
+.DS_Store
+trained_nets/barlow/
