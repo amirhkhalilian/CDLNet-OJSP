@@ -5,7 +5,7 @@ Each immediate subdirectory of runs_root with an args.json is a run. Run from th
     python experiments/barlow/aggregate.py trained_nets/barlow
 Reads per run: args.json, coherence/coherence.json (falls back to the last dict_metrics.jsonl
 entry), test_<test_set>_None.txt (from analyze.py --test), val.txt, barlow.txt, backtrack.txt.
-Runs are grouped by (condition, beta, lambda, a_max), seeds pooled.
+Runs are grouped by (condition, beta, lambda, a_max, tie_D), seeds pooled.
 Writes to <runs_root>/aggregate (or --out): runs.csv, groups.csv, summary.md,
 tradeoff.png, training.png, layers.png.
 """
@@ -97,6 +97,7 @@ def load_run(run_dir, test_set):
 
     r = {"run": os.path.basename(os.path.normpath(run_dir)), "cond": cond, "beta": beta,
          "lambda": lambd, "a_max": args["model"].get("a_max"),
+         "tie_D": ",".join(args["model"].get("tie_D") or []) or None,
          "view": view, "family": family, "seed": args.get("seed"), "metrics_source": source}
     if final is not None:
         for name, bank, key in METRICS:
@@ -123,16 +124,16 @@ def load_run(run_dir, test_set):
 SCALARS = [name for name, _, _ in METRICS] + ["val_psnr", "mean_Cii", "n_backtracks"]
 
 def group_runs(runs):
-    """ groups keyed by (cond, beta, lambda, a_max), seeds pooled.
+    """ groups keyed by (cond, beta, lambda, a_max, tie_D), seeds pooled.
     Curves are averaged over the epochs all seeds share.
     """
     groups = {}
     for r in runs:
-        groups.setdefault((r["cond"], r["beta"], r["lambda"], r["a_max"]), []).append(r)
-    order = lambda kv: (kv[0][0], kv[0][3] or 0, kv[0][2] or 0, kv[0][1] or 0)
+        groups.setdefault((r["cond"], r["beta"], r["lambda"], r["a_max"], r["tie_D"]), []).append(r)
+    order = lambda kv: (kv[0][0], kv[0][4] or "", kv[0][3] or 0, kv[0][2] or 0, kv[0][1] or 0)
     out = []
-    for (cond, beta, lambd, a_max), rs in sorted(groups.items(), key=order):
-        g = {"cond": cond, "beta": beta, "lambda": lambd, "a_max": a_max,
+    for (cond, beta, lambd, a_max, tie_D), rs in sorted(groups.items(), key=order):
+        g = {"cond": cond, "beta": beta, "lambda": lambd, "a_max": a_max, "tie_D": tie_D,
              "view": rs[0]["view"], "family": rs[0]["family"], "n": len(rs), "runs": rs,
              "seeds": sorted(r["seed"] for r in rs if r["seed"] is not None)}
         keys = SCALARS + sorted({k for r in rs for k in r if k.startswith("psnr_")}, key=lambda k: float(k[5:]))
@@ -153,7 +154,7 @@ def group_runs(runs):
     return out
 
 def variant(g, groups):
-    """ the parts of a group's setting that vary within its condition: beta, lambda; a_max when set.
+    """ the parts of a group's setting that vary within its condition: beta, lambda; a_max, tie_D when set.
     """
     same = [h for h in groups if h["cond"] == g["cond"]]
     parts = []
@@ -163,6 +164,8 @@ def variant(g, groups):
         parts.append(f"λ={g['lambda']:.3g}")
     if g["a_max"] is not None:
         parts.append(f"a_max={g['a_max']:g}")  # no '|': labels go into markdown tables
+    if g["tie_D"] is not None:
+        parts.append(f"tie_D={g['tie_D']}")
     return ", ".join(parts)
 
 def label(g, groups):
@@ -178,7 +181,7 @@ def fmt(g, k, digits=3):
     return f"{m:.{digits}f}" + (f" ± {s:.{digits}f}" if np.isfinite(s) else "")
 
 def write_tables(runs, groups, out_dir, psnr_keys):
-    meta = ["cond", "beta", "lambda", "a_max", "view"]
+    meta = ["cond", "beta", "lambda", "a_max", "tie_D", "view"]
     run_cols = ["run"] + meta + ["seed", "metrics_source"] + SCALARS + psnr_keys
     with open(os.path.join(out_dir, "runs.csv"), "w", newline="") as f:
         w = csv.writer(f)
@@ -235,7 +238,7 @@ def legend_handles(groups):
 
 def plot_tradeoff(groups, out_dir, psnr_key):
     """ PSNR vs redundancy of A, one point per group (error bars over seeds).
-    Beta sweeps sharing (cond, lambda, a_max) are connected.
+    Beta sweeps sharing (cond, lambda, a_max, tie_D) are connected.
     """
     ylab = f"test PSNR, σ={psnr_key[5:]} (dB)" if psnr_key != "val_psnr" else "final val PSNR (dB)"
     panels = [("A_n_dup", "near-dup pairs in A"), ("A_n_dup_nc", "near-dup pairs, non-collapsed atoms"),
@@ -244,9 +247,9 @@ def plot_tradeoff(groups, out_dir, psnr_key):
     with plt.rc_context(RC):
         fig, axs = plt.subplots(1, len(panels), figsize=(5*len(panels), 4), sharey=True, squeeze=False)
         for ax, (xk, xlab) in zip(axs[0], panels):
-            series = sorted({(g["cond"], g["lambda"] or 0, g["a_max"] or 0) for g in groups})
-            for cond, lambd, a_max in series:
-                gs = sorted([g for g in groups if (g["cond"], g["lambda"] or 0, g["a_max"] or 0) == (cond, lambd, a_max)],
+            skey = lambda g: (g["cond"], g["lambda"] or 0, g["a_max"] or 0, g["tie_D"] or "")
+            for cond, lambd, a_max, tie in sorted({skey(g) for g in groups}):
+                gs = sorted([g for g in groups if skey(g) == (cond, lambd, a_max, tie)],
                             key=lambda g: g["beta"] or 0)
                 c = FAMILY_COLOR[gs[0]["family"]]
                 m, ls = VIEW_STYLE[gs[0]["view"]]
@@ -271,29 +274,38 @@ def plot_tradeoff(groups, out_dir, psnr_key):
         plt.close(fig)
     return fn
 
+def ref_style(g):
+    """ line style of a c0/c1 reference: c0 dotted, c1 by variant (plain, clamped, tied, both).
+    """
+    if g["view"] == "single":
+        return ":"
+    return {(False, False): "-", (True, False): "--", (False, True): (0, (1, 1.5)), (True, True): "-."}[
+        (g["a_max"] is not None, g["tie_D"] is not None)]
+
 def plot_facets(groups, out_dir, fn_name, xkey, rows, xlabel, title):
-    """ one column per Barlow condition (c2..c5), its settings in the blue ramp,
-    c0/c1 as gray references (lighter gray when envelope-clamped). rows: list of (ykey, ylabel).
+    """ one column per Barlow condition (c2..c5) and tie_D setting, its settings in the blue ramp,
+    c0/c1 with the same tie_D as gray references (line style by clamp variant). rows: list of (ykey, ylabel).
     """
     has = lambda g, yk: g[yk] is not None and len(g[yk]) > 0 and np.isfinite(g[yk]).any()
     rows  = [(yk, yl) for yk, yl in rows if any(has(g, yk) for g in groups)]
     refs  = [g for g in groups if g["family"] == "ref"]
-    conds = sorted({g["cond"] for g in groups if g["family"] != "ref"}) or ["references"]
+    cols  = sorted({(g["cond"], g["tie_D"] or "") for g in groups if g["family"] != "ref"}) or [("references", "")]
     with plt.rc_context(RC):
-        fig, axs = plt.subplots(len(rows), len(conds), figsize=(4.2*len(conds), 3.2*len(rows)),
+        fig, axs = plt.subplots(len(rows), len(cols), figsize=(4.2*len(cols), 3.2*len(rows)),
                                 sharex=True, sharey="row", squeeze=False)
-        for j, cond in enumerate(conds):
-            gs = [g for g in groups if g["cond"] == cond]  # already ordered by a_max, lambda, beta
+        for j, (cond, tie) in enumerate(cols):
+            # already ordered by a_max, lambda, beta
+            gs = [g for g in groups if g["cond"] == cond and (g["tie_D"] or "") == tie]
+            col_refs = [g for g in refs if (g["tie_D"] or "") == tie] or refs
             ramp = BLUE_RAMP if len(gs) > 1 else [FAMILY_COLOR["noproj"]]
             idx  = np.linspace(0, len(ramp)-1, len(gs)).round().astype(int) if gs else []
             for i, (yk, ylab) in enumerate(rows):
                 ax = axs[i, j]
-                for g in refs:
+                for g in col_refs:
                     if not has(g, yk):
                         continue
                     x = g[xkey] if xkey != "layer" else np.arange(len(g[yk]))
-                    ax.plot(x, g[yk], color=MUTED if g["a_max"] is not None else INK2,
-                            linestyle=VIEW_STYLE[g["view"]][1], linewidth=1.5, label=label(g, groups))
+                    ax.plot(x, g[yk], color=INK2, linestyle=ref_style(g), linewidth=1.5, label=label(g, groups))
                 for g, k in zip(gs, idx):
                     if not has(g, yk):
                         continue
@@ -302,7 +314,8 @@ def plot_facets(groups, out_dir, fn_name, xkey, rows, xlabel, title):
                 if i == 0:
                     v = variant(gs[0], groups) if len(gs) == 1 else ""
                     single_beta = f"β={gs[0]['beta']:g}" if len(gs) == 1 and gs[0]["beta"] is not None else ""
-                    ax.set_title(cond + (f" ({', '.join(p for p in [single_beta, v] if p)})" if single_beta or v else ""))
+                    ax.set_title(cond + (f" ({', '.join(p for p in [single_beta, v] if p)})" if single_beta or v
+                                         else f" (tie_D={tie})" if tie else ""))
                 if j == 0:
                     ax.set_ylabel(ylab)
                 if i == len(rows) - 1:

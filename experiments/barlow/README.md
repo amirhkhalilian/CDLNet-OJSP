@@ -54,6 +54,13 @@ Envelope clamp: `model.a_max` bounds the Gabor envelope precision `|a| <= a_max`
 many atoms at the bound, so pick `a_max` with margin below `1/(2 * 0.8) = 0.625` (e.g. 0.5 -> >= 1 px)
 for clamped runs to have no collapsed atoms by the metric.
 
+Tying to D: `model.tie_D` (e.g. `["a", "w0", "psi"]`) ties those Gabor shape parameters of every
+`A_k` (incl. `A_0`) and `B_k` to the dictionary `D`, leaving the scale `alpha` free per operator:
+`A_k = alpha_A,k * D_shape`, `B_k = alpha_B,k * D_shape` (ISTA-like with learned per-layer gains;
+21,125 params instead of 70,980). Shift-coherence metrics of every `A_k` then equal those of `D`, and
+the Barlow loss, which sends no gradient to an untied `D`, reaches `D`'s shapes through the `A_k`.
+Not combinable with the older `shared` option, which ties `A_k` to `A_0` and `B_k` to `D` separately.
+
 Note: the Barlow term sends no gradient to `D` (it only appears in `x_hat = D z`), so the
 analysis filters are where its effect is expected.
 

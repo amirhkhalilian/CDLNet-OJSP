@@ -118,9 +118,16 @@ class GDLNet(nn.Module):
                  adaptive = False, # noise-adaptive thresholds
                  shared = "",      # which gabor parameters to share (e.g. "a_psi_w0_alpha")
                  a_max = None,     # bound on gabor envelope precision |a| (None -> unbounded)
+                 tie_D = None,     # gabor shape params tied to D in all A_k, B_k (e.g. ["a","w0","psi"])
                  init = True):     # False -> use power-method for weight init
         super(GDLNet, self).__init__()
-        
+
+        tie_D = list(tie_D or [])
+        if set(tie_D) - {"a", "w0", "psi"}:
+            raise ValueError(f"tie_D accepts 'a', 'w0', 'psi' (alpha stays free as per-layer gain), got {tie_D}")
+        if tie_D and shared:
+            raise ValueError("use either shared or tie_D, not both")
+
         # -- operator init --
         self.A = nn.ModuleList([ConvAdjoint2dGabor(M, C, P, stride=s, order=order) for _ in range(K)])
         self.B = nn.ModuleList([ConvAdjoint2dGabor(M, C, P, stride=s, order=order) for _ in range(K)])
@@ -160,9 +167,17 @@ class GDLNet(nn.Module):
                     self.A[k].psi   = self.A[0].psi
                     self.B[k].psi   = self.B[0].psi
 
+        # tie gabor shape params of every A_k (incl. A_0) and B_k to the dictionary D = B_0:
+        # A_k = alpha_A,k * D_shape, B_k = alpha_B,k * D_shape (ISTA-like, learned per-layer gains)
+        for name in tie_D:
+            for k in range(K):
+                setattr(self.A[k], name, getattr(self.D, name))
+                setattr(self.B[k], name, getattr(self.D, name))
+
         # set before clamping and spectral normalization, which use it
         self.K = K
         self.a_max = a_max
+        self.tie_D = tie_D
         self.clamp_envelope()
 
         # Don't bother running code if initializing trained model from state-dict
